@@ -1,11 +1,12 @@
 """
-Encrypted Chat Server (multi-room)
+Encrypted Chat Server (dynamic multi-room central host)
 Serves the EncryptedChat clients over WSS (secure WebSocket).
 
-One server process can host several independent rooms ("sessions"), each with its
-own encryption key. A client lands in whichever room's key it connects with;
-rooms are fully isolated (separate users, history, reactions). All settings live
-in config.json (created on first run) — NO key is hardcoded.
+Clients CREATE rooms on demand (name + key + optional admin password). Each room
+lives only in memory and is automatically removed once it has been empty for a
+while, so an idle server uses no resources. A client joins a room by connecting
+with that room's key. NOTHING is hardcoded — the server holds no keys at all;
+keys exist only in RAM for as long as a room is in use.
 """
 
 import asyncio
@@ -20,20 +21,16 @@ import sys
 from datetime import datetime
 
 # ============================================================
-# SERVER CONFIGURATION (loaded from config.json — never hardcoded)
+# SERVER CONFIGURATION (config.json — holds NO keys/passwords)
 # ============================================================
 CONFIG_FILE = "config.json"
-PLACEHOLDER = "CHANGE_ME"
 CONFIG_TEMPLATE = {
     "host": "0.0.0.0",
     "port": 8443,
-    "adminPassword": PLACEHOLDER,        # set your own — required for the admin panel
-    "rooms": [                            # one entry per room; each key must be unique
-        {"name": "General", "key": "CHANGE_ME_pick_a_unique_key"},
-        {"name": "Private", "key": "CHANGE_ME_pick_another_key"}
-    ],
     "certFile": "server.crt",
     "keyFile": "server.key",
+    "roomIdleTimeoutSeconds": 600,   # remove a room after it's been empty this long
+    "maxRooms": 500,                 # safety cap on concurrent rooms
 }
 
 # Fixed limits (keep in sync with the client)
@@ -42,47 +39,19 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024
 
 
 def load_config():
-    """Load config.json. On first run, write a template and exit so the host can
-    set their own admin password and room keys. Refuses to start otherwise."""
+    """Load config.json, creating it with defaults on first run. There are no
+    secrets to set, so the server just starts."""
     if not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(CONFIG_TEMPLATE, f, indent=2)
-        print(f"[!] Created {CONFIG_FILE}.")
-        print(f"[!] Set 'adminPassword' and a unique 'key' for each room, then run again.")
-        sys.exit(1)
-
+        print(f"[*] Created {CONFIG_FILE} with defaults.")
+        return dict(CONFIG_TEMPLATE)
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = {**CONFIG_TEMPLATE, **json.load(f)}
+            return {**CONFIG_TEMPLATE, **json.load(f)}
     except Exception as e:
-        print(f"[!] Could not read {CONFIG_FILE}: {e}")
-        sys.exit(1)
-
-    admin = str(cfg.get("adminPassword", "")).strip()
-    if not admin or admin == PLACEHOLDER:
-        print(f"[!] Set a real 'adminPassword' in {CONFIG_FILE} (not empty, not '{PLACEHOLDER}').")
-        sys.exit(1)
-
-    rooms = cfg.get("rooms")
-    if not isinstance(rooms, list) or not rooms:
-        print(f"[!] {CONFIG_FILE} needs a non-empty 'rooms' list (each with a 'name' and 'key').")
-        sys.exit(1)
-
-    seen_keys = set()
-    for i, r in enumerate(rooms):
-        if not isinstance(r, dict) or "name" not in r or "key" not in r:
-            print(f"[!] rooms[{i}] must have both 'name' and 'key'.")
-            sys.exit(1)
-        key = str(r["key"]).strip()
-        if not key or key.startswith(PLACEHOLDER):
-            print(f"[!] Set a real 'key' for room '{r.get('name')}' (not empty, not a '{PLACEHOLDER}' placeholder).")
-            sys.exit(1)
-        if key in seen_keys:
-            print(f"[!] Two rooms share the same key — every room must have a UNIQUE key.")
-            sys.exit(1)
-        seen_keys.add(key)
-
-    return cfg
+        print(f"[!] Could not read {CONFIG_FILE}: {e} — using defaults.")
+        return dict(CONFIG_TEMPLATE)
 
 
 _cfg = load_config()
@@ -90,8 +59,8 @@ SERVER_HOST = _cfg["host"]
 SERVER_PORT = int(_cfg["port"])
 SSL_CERT_FILE = _cfg["certFile"]
 SSL_KEY_FILE = _cfg["keyFile"]
-ADMIN_PASSWORD = _cfg["adminPassword"]
-ROOMS_CONFIG = _cfg["rooms"]
+ROOM_IDLE_TIMEOUT = int(_cfg.get("roomIdleTimeoutSeconds", 600))
+MAX_ROOMS = int(_cfg.get("maxRooms", 500))
 # ============================================================
 
 # Install dependencies
@@ -134,9 +103,7 @@ def generate_self_signed_cert():
     print("[*] Generating self-signed SSL certificate...")
 
     key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-        backend=default_backend()
+        public_exponent=65537, key_size=2048, backend=default_backend()
     )
 
     subject = issuer = x509.Name([
@@ -147,15 +114,9 @@ def generate_self_signed_cert():
         x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
     ])
 
-    cert = x509.CertificateBuilder().subject_name(
-        subject
-    ).issuer_name(
-        issuer
-    ).public_key(
+    cert = x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(
         key.public_key()
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
+    ).serial_number(x509.random_serial_number()).not_valid_before(
         datetime.utcnow()
     ).not_valid_after(
         datetime.utcnow().replace(year=datetime.utcnow().year + 10)
@@ -173,7 +134,6 @@ def generate_self_signed_cert():
             format=serialization.PrivateFormat.TraditionalOpenSSL,
             encryption_algorithm=serialization.NoEncryption()
         ))
-
     with open(SSL_CERT_FILE, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
@@ -205,16 +165,15 @@ class AESCipher:
             decryptor = cipher.decryptor()
             padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
             unpadder = padding.PKCS7(128).unpadder()
-            plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
-            return plaintext.decode('utf-8')
+            return (unpadder.update(padded_plaintext) + unpadder.finalize()).decode('utf-8')
         except Exception:
             return None
 
 
 class Message:
     """Represents a chat message"""
-    def __init__(self, msg_id: str, username: str, content: str, msg_type: str = "text",
-                 reply_to: str = None, image_data: str = None, timestamp: float = None):
+    def __init__(self, msg_id, username, content, msg_type="text",
+                 reply_to=None, image_data=None, timestamp=None):
         self.id = msg_id
         self.username = username
         self.content = content
@@ -229,70 +188,110 @@ class Message:
 
     def to_dict(self):
         return {
-            'id': self.id,
-            'username': self.username,
-            'content': self.content,
-            'msg_type': self.msg_type,
-            'reply_to': self.reply_to,
-            'image_data': self.image_data,
-            'reactions': self.reactions,
-            'edited': self.edited,
-            'edited_by': self.edited_by,
-            'deleted': self.deleted,
-            'timestamp': self.timestamp
+            'id': self.id, 'username': self.username, 'content': self.content,
+            'msg_type': self.msg_type, 'reply_to': self.reply_to, 'image_data': self.image_data,
+            'reactions': self.reactions, 'edited': self.edited, 'edited_by': self.edited_by,
+            'deleted': self.deleted, 'timestamp': self.timestamp
         }
 
 
 class Room:
-    """One isolated chat room, identified by its own encryption key."""
-    def __init__(self, name: str, key: str):
+    """One isolated, in-memory chat room created on demand by a client."""
+    def __init__(self, name, key, admin_password=""):
         self.name = name
+        self.admin_password = admin_password or ""
         self.cipher = AESCipher(key)
         self.clients = {}        # websocket -> {"username", "is_admin", "typing"}
         self.messages = []
         self.typing_users = set()
         self.banned_users = set()
+        self.empty_since = time.time()   # set when the room has no clients
 
 
 class ChatServer:
-    """Multi-room WSS chat server."""
+    """Dynamic multi-room WSS chat server. Holds no keys on disk."""
 
     def __init__(self):
-        self.rooms = [Room(r["name"], r["key"]) for r in ROOMS_CONFIG]
+        self.rooms = {}          # key(str) -> Room  (in-memory only)
         self.start_time = time.time()
 
-    def log(self, message: str, msg_type: str = "info"):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        prefix = {
-            "info": "[INFO]", "join": "[+]", "leave": "[-]", "msg": "[MSG]",
-            "error": "[ERROR]", "system": "[SYS]", "admin": "[ADMIN]", "wss": "[WSS]"
-        }.get(msg_type, "[INFO]")
-        print(f"{timestamp} {prefix} {message}")
+    def log(self, message, msg_type="info"):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        prefix = {"info": "[INFO]", "join": "[+]", "leave": "[-]", "msg": "[MSG]",
+                  "error": "[ERROR]", "system": "[SYS]", "admin": "[ADMIN]", "wss": "[WSS]"}.get(msg_type, "[INFO]")
+        print(f"{ts} {prefix} {message}")
 
-    # ---- per-room send / broadcast ----------------------------------------
+    # ---- send / broadcast --------------------------------------------------
 
-    async def send_encrypted(self, room: Room, websocket, data: dict):
+    async def send_plain(self, websocket, data):
+        """Send an UNENCRYPTED control message (used before a room/key is known)."""
         try:
-            encrypted = room.cipher.encrypt(json.dumps(data))
-            await websocket.send(encrypted)
+            await websocket.send(json.dumps(data))
         except Exception:
             pass
 
-    async def broadcast(self, room: Room, data: dict, exclude=None):
+    async def send_encrypted(self, room, websocket, data):
+        try:
+            await websocket.send(room.cipher.encrypt(json.dumps(data)))
+        except Exception:
+            pass
+
+    async def broadcast(self, room, data, exclude=None):
         for ws in list(room.clients.keys()):
             if ws != exclude:
                 await self.send_encrypted(room, ws, data)
 
-    async def broadcast_system(self, room: Room, message: str, exclude=None):
+    async def broadcast_system(self, room, message, exclude=None):
         await self.broadcast(room, {'type': 'system', 'message': message, 'timestamp': time.time()}, exclude)
 
-    async def broadcast_user_list(self, room: Room):
-        online_users = [c["username"] for c in room.clients.values()]
+    async def broadcast_user_list(self, room):
+        users = [c["username"] for c in room.clients.values()]
         admins = [c["username"] for c in room.clients.values() if c["is_admin"]]
-        await self.broadcast(room, {'type': 'user_list', 'users': online_users, 'admins': admins})
+        await self.broadcast(room, {'type': 'user_list', 'users': users, 'admins': admins})
 
-    async def broadcast_typing_status(self, room: Room):
+    async def broadcast_typing_status(self, room):
         await self.broadcast(room, {'type': 'typing_status', 'users': list(room.typing_users)})
+
+    # ---- room lifecycle ----------------------------------------------------
+
+    def prune_empty_rooms(self):
+        now = time.time()
+        for key in list(self.rooms.keys()):
+            r = self.rooms[key]
+            if not r.clients and r.empty_since and (now - r.empty_since) > ROOM_IDLE_TIMEOUT:
+                del self.rooms[key]
+                self.log(f"Pruned idle room '{r.name}' ({len(self.rooms)} left)", "info")
+
+    async def cleanup_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            try:
+                self.prune_empty_rooms()
+            except Exception as e:
+                self.log(f"Cleanup error: {e}", "error")
+
+    async def handle_create_room(self, websocket, req):
+        name = str(req.get('name', '')).strip()
+        key = str(req.get('key', '')).strip()
+        admin_pw = str(req.get('adminPassword', '') or '')
+
+        if not name or not key:
+            await self.send_plain(websocket, {'type': 'create_room_result', 'success': False,
+                                              'message': 'Room name and key are required.'})
+            return
+        self.prune_empty_rooms()
+        if key in self.rooms:
+            await self.send_plain(websocket, {'type': 'create_room_result', 'success': False,
+                                              'message': 'That key is already in use — just join it instead.'})
+            return
+        if len(self.rooms) >= MAX_ROOMS:
+            await self.send_plain(websocket, {'type': 'create_room_result', 'success': False,
+                                              'message': 'Server is at its room limit, try again later.'})
+            return
+
+        self.rooms[key] = Room(name, key, admin_pw)
+        self.log(f"Room created: '{name}' ({len(self.rooms)} active)", "info")
+        await self.send_plain(websocket, {'type': 'create_room_result', 'success': True, 'name': name})
 
     # ---- connection lifecycle ---------------------------------------------
 
@@ -303,12 +302,20 @@ class ChatServer:
 
         try:
             self.log(f"WSS connection from {client_ip}", "wss")
-
-            # First message must be a 'join'. Find the room by trying each room's key:
-            # only the correct key decrypts to valid JSON with type == 'join'.
             raw_data = await asyncio.wait_for(websocket.recv(), timeout=30)
+
+            # First, is this a plaintext control message (e.g. create_room)?
+            try:
+                control = json.loads(raw_data)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                control = None
+            if isinstance(control, dict) and control.get('type') == 'create_room':
+                await self.handle_create_room(websocket, control)
+                return  # creation is its own short connection; client reconnects to join
+
+            # Otherwise it's an encrypted join — find the room by trying each room's key.
             decrypted = None
-            for r in self.rooms:
+            for r in self.rooms.values():
                 d = r.cipher.decrypt(raw_data)
                 if not d:
                     continue
@@ -321,6 +328,7 @@ class ChatServer:
                     break
 
             if room is None:
+                # No matching room — either the key is wrong or the room doesn't exist yet.
                 await websocket.close()
                 return
 
@@ -330,21 +338,20 @@ class ChatServer:
             if username.lower() in room.banned_users:
                 await self.send_encrypted(room, websocket, {'type': 'kicked', 'message': 'You are banned from this room'})
                 await websocket.close()
-                self.log(f"Banned user {username} tried to join room '{room.name}'", "admin")
                 return
 
             room.clients[websocket] = {"username": username, "is_admin": False, "typing": False}
+            room.empty_since = None
             self.log(f"{username} joined room '{room.name}' from {client_ip}", "join")
             await self.broadcast_system(room, f"{username} joined the chat", exclude=websocket)
 
-            welcome = {
+            await self.send_encrypted(room, websocket, {
                 'type': 'welcome',
                 'room': room.name,
                 'message': f"Connected to '{room.name}'! {len(room.clients)} user(s) online.",
                 'online_users': [c["username"] for c in room.clients.values()],
                 'message_history': [m.to_dict() for m in room.messages[-50:]]
-            }
-            await self.send_encrypted(room, websocket, welcome)
+            })
             await self.broadcast_user_list(room)
 
             async for raw_data in websocket:
@@ -367,6 +374,8 @@ class ChatServer:
         finally:
             if room is not None and websocket in room.clients:
                 del room.clients[websocket]
+                if not room.clients:
+                    room.empty_since = time.time()   # eligible for cleanup
             if room is not None and username:
                 room.typing_users.discard(username)
                 self.log(f"{username} left room '{room.name}'", "leave")
@@ -376,26 +385,21 @@ class ChatServer:
 
     # ---- message handling (scoped to a room) ------------------------------
 
-    async def handle_message(self, room: Room, websocket, username: str, msg: dict):
+    async def handle_message(self, room, websocket, username, msg):
         msg_type = msg.get('type', 'message')
 
         if msg_type == 'message':
             content = msg.get('content', '')
             reply_to = msg.get('reply_to')
             image_data = msg.get('image_data')
-
             if image_data and len(image_data) > MAX_IMAGE_SIZE:
                 await self.send_encrypted(room, websocket, {'type': 'error', 'message': 'Image too large'})
                 return
-
-            message = Message(
-                msg_id=str(uuid.uuid4()), username=username, content=content,
-                msg_type='image' if image_data else 'text', reply_to=reply_to, image_data=image_data
-            )
+            message = Message(str(uuid.uuid4()), username, content,
+                              'image' if image_data else 'text', reply_to, image_data)
             room.messages.append(message)
             if len(room.messages) > MAX_MESSAGE_HISTORY:
                 room.messages = room.messages[-MAX_MESSAGE_HISTORY:]
-
             self.log(f"[{room.name}] {username}: {content[:50]}{'...' if len(content) > 50 else ''}", "msg")
             await self.broadcast(room, {'type': 'message', 'message': message.to_dict()})
 
@@ -414,61 +418,54 @@ class ChatServer:
             is_typing = msg.get('typing', False)
             if websocket in room.clients:
                 room.clients[websocket]["typing"] = is_typing
-                if is_typing:
-                    room.typing_users.add(username)
-                else:
-                    room.typing_users.discard(username)
+                (room.typing_users.add if is_typing else room.typing_users.discard)(username)
             await self.broadcast_typing_status(room)
 
         elif msg_type == 'admin_auth':
-            if msg.get('password', '') == ADMIN_PASSWORD:
+            if room.admin_password and msg.get('password', '') == room.admin_password:
                 room.clients[websocket]["is_admin"] = True
                 await self.send_encrypted(room, websocket, {'type': 'admin_auth_result', 'success': True})
-                self.log(f"[{room.name}] {username} authenticated as admin", "admin")
+                self.log(f"[{room.name}] {username} is now admin", "admin")
             else:
                 await self.send_encrypted(room, websocket, {'type': 'admin_auth_result', 'success': False})
-                self.log(f"[{room.name}] {username} failed admin auth", "admin")
 
         elif msg_type == 'admin_command':
-            if not room.clients.get(websocket, {}).get("is_admin", False):
-                return
-            await self.handle_admin_command(room, websocket, username, msg.get('command', ''))
+            if room.clients.get(websocket, {}).get("is_admin", False):
+                await self.handle_admin_command(room, websocket, username, msg.get('command', ''))
 
     async def edit_message(self, room, msg_id, new_content, editor, is_admin):
-        for message in room.messages:
-            if message.id == msg_id and not message.deleted:
-                if message.username == editor or is_admin:
-                    message.content = new_content
-                    message.edited = True
-                    message.edited_by = editor if editor != message.username else None
-                    await self.broadcast(room, {'type': 'message_edited', 'message': message.to_dict()})
-                    return
-
-    async def delete_message(self, room, msg_id, deleter, is_admin):
-        for message in room.messages:
-            if message.id == msg_id and not message.deleted:
-                if message.username == deleter or is_admin:
-                    message.deleted = True
-                    message.content = "[Message deleted]"
-                    message.image_data = None
-                    await self.broadcast(room, {'type': 'message_deleted', 'message_id': msg_id})
-                    return
-
-    async def toggle_reaction(self, room, msg_id, username, emoji):
-        for message in room.messages:
-            if message.id == msg_id:
-                if emoji not in message.reactions:
-                    message.reactions[emoji] = []
-                if username in message.reactions[emoji]:
-                    message.reactions[emoji].remove(username)
-                    if not message.reactions[emoji]:
-                        del message.reactions[emoji]
-                else:
-                    message.reactions[emoji].append(username)
-                await self.broadcast(room, {'type': 'reaction_update', 'message_id': msg_id, 'reactions': message.reactions})
+        for m in room.messages:
+            if m.id == msg_id and not m.deleted and (m.username == editor or is_admin):
+                m.content = new_content
+                m.edited = True
+                m.edited_by = editor if editor != m.username else None
+                await self.broadcast(room, {'type': 'message_edited', 'message': m.to_dict()})
                 return
 
-    async def handle_admin_command(self, room, websocket, admin_name, command: str):
+    async def delete_message(self, room, msg_id, deleter, is_admin):
+        for m in room.messages:
+            if m.id == msg_id and not m.deleted and (m.username == deleter or is_admin):
+                m.deleted = True
+                m.content = "[Message deleted]"
+                m.image_data = None
+                await self.broadcast(room, {'type': 'message_deleted', 'message_id': msg_id})
+                return
+
+    async def toggle_reaction(self, room, msg_id, username, emoji):
+        for m in room.messages:
+            if m.id == msg_id:
+                if emoji not in m.reactions:
+                    m.reactions[emoji] = []
+                if username in m.reactions[emoji]:
+                    m.reactions[emoji].remove(username)
+                    if not m.reactions[emoji]:
+                        del m.reactions[emoji]
+                else:
+                    m.reactions[emoji].append(username)
+                await self.broadcast(room, {'type': 'reaction_update', 'message_id': msg_id, 'reactions': m.reactions})
+                return
+
+    async def handle_admin_command(self, room, websocket, admin_name, command):
         parts = command.strip().split()
         if not parts:
             return
@@ -487,7 +484,6 @@ class ChatServer:
                 if info["username"].lower() == target.lower():
                     await self.send_encrypted(room, ws, {'type': 'kicked', 'message': 'You have been kicked'})
                     await ws.close()
-                    self.log(f"[{room.name}] {admin_name} kicked {target}", "admin")
                     await self.broadcast_system(room, f"{target} was kicked")
                     await reply(True, f'Kicked {target}')
                     return
@@ -498,7 +494,6 @@ class ChatServer:
             m = Message(str(uuid.uuid4()), '[ADMIN]', text)
             room.messages.append(m)
             await self.broadcast(room, {'type': 'message', 'message': m.to_dict()})
-            self.log(f"[{room.name}] [ADMIN] {admin_name}: {text}", "admin")
             await reply(True, 'Broadcast sent')
 
         elif cmd == 'announce' and len(parts) >= 2:
@@ -508,7 +503,6 @@ class ChatServer:
         elif cmd == 'clear':
             room.messages.clear()
             await self.broadcast(room, {'type': 'clear_chat'})
-            self.log(f"[{room.name}] {admin_name} cleared chat", "admin")
             await reply(True, 'Chat cleared')
 
         elif cmd == 'ban' and len(parts) >= 2:
@@ -519,7 +513,6 @@ class ChatServer:
                     await self.send_encrypted(room, ws, {'type': 'kicked', 'message': 'You have been banned'})
                     await ws.close()
                     await self.broadcast_system(room, f"{target} was banned")
-            self.log(f"[{room.name}] {admin_name} banned {target}", "admin")
             await reply(True, f'Banned {target}')
 
         elif cmd == 'unban' and len(parts) >= 2:
@@ -531,31 +524,25 @@ class ChatServer:
                 await reply(False, f'{target} is not banned')
 
         elif cmd == 'bans':
-            banned = list(room.banned_users)
-            await reply(True, f"Banned in '{room.name}' ({len(banned)}): {', '.join(banned)}" if banned else "No banned users")
+            b = list(room.banned_users)
+            await reply(True, f"Banned in '{room.name}' ({len(b)}): {', '.join(b)}" if b else "No banned users")
 
         elif cmd == 'stats':
             uptime = int(time.time() - self.start_time)
-            await reply(True, (f"Server Stats:\n"
-                               f"Uptime: {uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s\n"
-                               f"Room: {room.name}\n"
-                               f"Messages: {len(room.messages)}\n"
-                               f"Online here: {len(room.clients)}\n"
-                               f"Rooms on server: {len(self.rooms)}"))
+            await reply(True, (f"Server Stats:\nUptime: {uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s\n"
+                               f"Room: {room.name}\nMessages: {len(room.messages)}\n"
+                               f"Online here: {len(room.clients)}\nActive rooms: {len(self.rooms)}"))
 
         elif cmd == 'export':
-            export_data = {
-                'server_name': 'EncryptedChat', 'room': room.name,
-                'export_time': time.strftime("%Y-%m-%d %H:%M:%S"),
-                'message_count': len(room.messages),
-                'messages': [m.to_dict() for m in room.messages]
-            }
             await self.send_encrypted(room, websocket, {
-                'type': 'admin_result', 'success': True,
-                'message': 'Chat exported (check message)', 'export_data': export_data
+                'type': 'admin_result', 'success': True, 'message': 'Chat exported (check message)',
+                'export_data': {'server_name': 'EncryptedChat', 'room': room.name,
+                                'export_time': time.strftime("%Y-%m-%d %H:%M:%S"),
+                                'message_count': len(room.messages),
+                                'messages': [m.to_dict() for m in room.messages]}
             })
 
-    # ---- server console ---------------------------------------------------
+    # ---- server console ----------------------------------------------------
 
     async def console_handler(self):
         loop = asyncio.get_event_loop()
@@ -564,32 +551,21 @@ class ChatServer:
                 user_input = (await loop.run_in_executor(None, input)).strip()
                 if not user_input:
                     continue
-
                 if user_input.lower() == '/quit':
                     self.log("Shutting down...", "system")
-                    for room in self.rooms:
+                    for room in list(self.rooms.values()):
                         for ws in list(room.clients.keys()):
                             await ws.close()
                     return
-
                 elif user_input.lower() == '/rooms':
-                    for room in self.rooms:
+                    if not self.rooms:
+                        self.log("  (no active rooms)", "info")
+                    for room in self.rooms.values():
                         self.log(f"  '{room.name}': {len(room.clients)} online, {len(room.messages)} msgs", "info")
-
-                elif user_input.lower() == '/users':
-                    for room in self.rooms:
-                        users = [c['username'] for c in room.clients.values()]
-                        self.log(f"  '{room.name}': {', '.join(users) if users else '(empty)'}", "info")
-
                 elif user_input.lower() == '/help':
-                    print("\nServer Commands:")
-                    print("  /rooms  - list rooms with online/message counts")
-                    print("  /users  - list users per room")
-                    print("  /quit   - shut the server down\n")
-
+                    print("\nServer Commands:\n  /rooms  - list active rooms\n  /quit   - shut down\n")
                 else:
                     print("Unknown command. Type /help.")
-
             except EOFError:
                 self.log("Running in background mode (no console)", "system")
                 await asyncio.sleep(float('inf'))
@@ -598,24 +574,22 @@ class ChatServer:
 
     async def run(self):
         generate_self_signed_cert()
-
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(SSL_CERT_FILE, SSL_KEY_FILE)
 
         print("\n" + "=" * 50)
-        print("  ENCRYPTED CHAT SERVER (WSS, multi-room)")
+        print("  ENCRYPTED CHAT SERVER (WSS, dynamic rooms)")
         print("=" * 50)
-        print(f"  Protocol: wss:// (secure WebSocket)")
         print(f"  Listening: {SERVER_HOST}:{SERVER_PORT}")
-        print(f"  Rooms: {', '.join(r.name for r in self.rooms)}")
-        print(f"  Admin password: set ({len(ADMIN_PASSWORD)} chars)")
+        print(f"  Rooms are created on demand and pruned after {ROOM_IDLE_TIMEOUT}s idle.")
+        print(f"  No keys are stored on the server.")
         print("=" * 50)
         print("\nType /help for commands\n")
 
         async with serve(self.handle_client, SERVER_HOST, SERVER_PORT,
                          ssl=ssl_context, ping_interval=30, ping_timeout=10):
-            self.log(f"WSS server running on wss://{SERVER_HOST}:{SERVER_PORT} with {len(self.rooms)} room(s)", "wss")
-            self.log("Waiting for connections...", "system")
+            self.log(f"WSS server running on wss://{SERVER_HOST}:{SERVER_PORT}", "wss")
+            asyncio.create_task(self.cleanup_loop())
             await self.console_handler()
 
 

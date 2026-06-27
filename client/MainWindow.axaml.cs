@@ -25,4 +25,12 @@ public partial class MainWindow : Window
         w.Closed += (_, _) => { if (!w.ChatOpened) Show(); };
         w.Show();
     }
+
+    private void CreateRoom_Click(object? sender, RoutedEventArgs e)
+    {
+        var w = new CreateRoomWindow(this);
+        Hide();
+        w.Closed += (_, _) => { if (!w.ChatOpened) Show(); };
+        w.Show();
+    }
 }

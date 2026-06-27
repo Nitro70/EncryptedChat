@@ -215,6 +215,51 @@ namespace EncryptedChat
             await SendEncryptedAsync(msg);
         }
 
+        /// <summary>
+        /// Ask a central server to create a new room. This is a one-shot plaintext control
+        /// message (sent over the TLS/WSS connection before any room key is established).
+        /// Returns (success, message). After success, connect normally with the key to join.
+        /// </summary>
+        public static async Task<(bool ok, string message)> CreateRoomAsync(
+            string host, int port, string name, string key, string adminPassword)
+        {
+            if (string.IsNullOrWhiteSpace(host) || port <= 0)
+                return (false, "Server address and port are required.");
+
+            using var ws = new ClientWebSocket();
+            ws.Options.RemoteCertificateValidationCallback = (s, c, ch, e) => true;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            try
+            {
+                await ws.ConnectAsync(new Uri($"wss://{host}:{port}"), cts.Token);
+
+                string req = JsonSerializer.Serialize(new
+                {
+                    type = "create_room",
+                    name = name,
+                    key = key,
+                    adminPassword = adminPassword
+                });
+                await ws.SendAsync(Encoding.UTF8.GetBytes(req), WebSocketMessageType.Text, true, cts.Token);
+
+                var buffer = new byte[64 * 1024];
+                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                string respText = Encoding.UTF8.GetString(buffer, 0, result.Count);
+
+                try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None); } catch { }
+
+                using var doc = JsonDocument.Parse(respText);
+                var root = doc.RootElement;
+                bool success = root.TryGetProperty("success", out var s2) && s2.GetBoolean();
+                string msg = root.TryGetProperty("message", out var m) ? (m.GetString() ?? "") : "";
+                return (success, msg);
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
         public async Task DisconnectAsync()
         {
             _isConnected = false;

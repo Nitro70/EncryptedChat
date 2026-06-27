@@ -14,31 +14,45 @@
                    HorizontalAlignment="Center" Margin="0,0,0,60"/>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal"
-                    HorizontalAlignment="Center" VerticalAlignment="Top" Spacing="40">
+                    HorizontalAlignment="Center" VerticalAlignment="Top" Spacing="26">
 
-            <Border Background="#16213e" BorderBrush="#0f3460" BorderThickness="2" CornerRadius="6" Width="260">
+            <Border Background="#e94560" BorderBrush="#e94560" BorderThickness="2" CornerRadius="6" Width="240">
                 <StackPanel>
-                    <Button Content="🏠 LAN Mode" Click="SelectLanMode_Click"
-                            Background="#16213e" Foreground="#eaeaea"
-                            FontSize="16" FontWeight="Bold" BorderThickness="0"
-                            Padding="40,35" HorizontalAlignment="Stretch"
+                    <Button Content="🌐 Connect to Server" Click="SelectServerMode_Click"
+                            Background="#e94560" Foreground="White"
+                            FontSize="15" FontWeight="Bold" BorderThickness="0"
+                            Padding="30,32" HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Center"/>
-                    <TextBlock Text="Local network&#x0a;UDP discovery • no internet required"
+                    <TextBlock Text="Join a room with its key&#x0a;at any server address"
+                               FontSize="11" Foreground="White"
+                               TextAlignment="Center" TextWrapping="Wrap"
+                               Margin="10,0,10,16"/>
+                </StackPanel>
+            </Border>
+
+            <Border Background="#16213e" BorderBrush="#00ff88" BorderThickness="2" CornerRadius="6" Width="240">
+                <StackPanel>
+                    <Button Content="➕ Create a Room" Click="CreateRoom_Click"
+                            Background="#16213e" Foreground="#00ff88"
+                            FontSize="15" FontWeight="Bold" BorderThickness="0"
+                            Padding="30,32" HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"/>
+                    <TextBlock Text="Make a new room on a&#x0a;central server and host it"
                                FontSize="11" Foreground="#888888"
                                TextAlignment="Center" TextWrapping="Wrap"
                                Margin="10,0,10,16"/>
                 </StackPanel>
             </Border>
 
-            <Border Background="#e94560" BorderBrush="#e94560" BorderThickness="2" CornerRadius="6" Width="260">
+            <Border Background="#16213e" BorderBrush="#0f3460" BorderThickness="2" CornerRadius="6" Width="240">
                 <StackPanel>
-                    <Button Content="🌐 Connect to Server" Click="SelectServerMode_Click"
-                            Background="#e94560" Foreground="White"
-                            FontSize="16" FontWeight="Bold" BorderThickness="0"
-                            Padding="40,35" HorizontalAlignment="Stretch"
+                    <Button Content="🏠 LAN Mode" Click="SelectLanMode_Click"
+                            Background="#16213e" Foreground="#eaeaea"
+                            FontSize="15" FontWeight="Bold" BorderThickness="0"
+                            Padding="30,32" HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Center"/>
-                    <TextBlock Text="Enter any server address&#x0a;Secure WebSocket (WSS)"
-                               FontSize="11" Foreground="White"
+                    <TextBlock Text="Local network&#x0a;UDP discovery • no internet"
+                               FontSize="11" Foreground="#888888"
                                TextAlignment="Center" TextWrapping="Wrap"
                                Margin="10,0,10,16"/>
                 </StackPanel>

@@ -1,11 +1,8 @@
 {
   "host": "0.0.0.0",
   "port": 8443,
-  "adminPassword": "CHANGE_ME",
-  "rooms": [
-    { "name": "General", "key": "CHANGE_ME_pick_a_unique_key" },
-    { "name": "Private", "key": "CHANGE_ME_pick_another_key" }
-  ],
   "certFile": "server.crt",
-  "keyFile": "server.key"
+  "keyFile": "server.key",
+  "roomIdleTimeoutSeconds": 600,
+  "maxRooms": 500
 }

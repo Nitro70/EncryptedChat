@@ -2,18 +2,20 @@
 
 A small, self-hostable encrypted chat app. A cross-platform desktop **client**
 (Avalonia, runs on Windows, Linux and macOS) talks to a lightweight Python
-**server** over a secure WebSocket. Messages are end-to-end encrypted with a key
-that you choose and share out-of-band — the server only ever relays ciphertext.
+**server** over a secure WebSocket. Messages are AES-256-CBC encrypted with a key
+you choose and share out-of-band.
 
-There is **no built-in central server**: you point the client at any address
-running the server script. Nothing — no server, no key, no password — is
-hardcoded.
+There is **no built-in central server** — you point the client at any address
+running the server script. The server itself **stores no keys and no rooms**:
+clients create rooms on demand, rooms live only in memory while in use, and an
+idle room is automatically removed. Nothing is hardcoded.
 
 ## Features
 
 - 🔐 AES-256-CBC encryption (key derived from a shared passphrase)
 - 🌐 Connect to any server by address + port, or 🏠 discover servers on your LAN
-- 🚪 One server can host multiple isolated **rooms**, each with its own key
+- 🚪 **Create rooms on demand** on a central server — each room has its own key,
+  lives only while it's in use, and is auto-removed once empty
 - ✏️ Edit / 🗑️ delete messages · 😊 emoji reactions · 💬 replies
 - 📎 Image sharing · ⌨️ typing indicators · 👥 live user list · 📜 history on join
 - 👑 Optional admin panel (kick / ban / broadcast / stats / clear)
@@ -46,9 +48,12 @@ dotnet publish -c Release -r linux-x64 --self-contained
 dotnet publish -c Release -r osx-arm64 --self-contained
 ```
 
-Pick **Connect to Server** and enter the address, port, a username, and the
-encryption key. Or pick **LAN Mode** to discover/connect to servers on your
-local network. The last-used connection is remembered locally (never shared).
+- **Create a Room** — make a new room on a central server (name + key + optional
+  admin password) and get dropped straight into it. Share the key to invite people.
+- **Connect to Server** — join an existing room with its address, port, and key.
+- **LAN Mode** — discover/connect to servers on your local network.
+
+The last-used connection is remembered locally (never shared).
 
 ## Hosting a server
 
@@ -60,40 +65,39 @@ pip install -r requirements.txt
 python server.py
 ```
 
-On the **first run** the server writes a `config.json` and exits. Open it and
-set your own values, then run `python server.py` again:
+The server just runs — there are no secrets to set. On first run it writes a
+`config.json` with sensible defaults and starts:
 
 ```json
 {
   "host": "0.0.0.0",
   "port": 8443,
-  "adminPassword": "set-your-own",
-  "rooms": [
-    { "name": "General", "key": "set-a-unique-key" },
-    { "name": "Private", "key": "set-another-unique-key" }
-  ],
   "certFile": "server.crt",
-  "keyFile": "server.key"
+  "keyFile": "server.key",
+  "roomIdleTimeoutSeconds": 600,
+  "maxRooms": 500
 }
 ```
 
-### Rooms (multiple keyed sessions)
+A self-signed TLS certificate is generated automatically on first run.
 
-One server hosts as many **rooms** as you list — each with its own **unique
-key**. A client lands in whichever room's key it connects with, and rooms are
-fully isolated (separate users, history and reactions). To invite someone to a
-room, share that room's key. Add or remove rooms by editing the list and
-restarting.
+### Rooms (created on demand, no keys on the server)
 
-- **room `key`** — the shared secret for that room; clients enter it to join.
-  Every room's key must be unique (and never a placeholder).
-- **`adminPassword`** — required to use the admin panel; admin actions apply to
-  the admin's own room. The server refuses to start until the admin password and
-  every room key are set (no defaults are shipped — **nothing is hardcoded**).
-- A self-signed TLS certificate is generated automatically on first run.
+The server holds **no keys and no rooms** on disk. Rooms are created at runtime
+**from the app**: in the client, pick **Create a Room**, give it a name, a key,
+and (optionally) an admin password for that room. Share the room's **key** with
+whoever you want to join (they use **Connect to Server** with that key).
 
-The server keeps recent messages in memory only (capped, cleared on restart) —
-it does not persist chat history to disk.
+- Each room lives **only in memory** while it's in use.
+- When a room has been empty for `roomIdleTimeoutSeconds` (default 10 minutes),
+  it is **automatically removed** — so an idle server uses no resources.
+- `maxRooms` caps how many rooms can exist at once.
+- Anyone who can reach the server can create a room, but a room can only be
+  joined by someone who has its key. Nothing is hardcoded — **the server never
+  stores a key**.
+
+Recent messages are kept in memory only (capped) and are gone when the room is
+removed or the server restarts.
 
 ### Connecting clients to your server
 

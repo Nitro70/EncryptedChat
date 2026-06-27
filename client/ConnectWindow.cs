@@ -122,7 +122,7 @@ namespace EncryptedChat
                 {
                     IsEnabled = true;
                     _status.Text = "Connection failed.";
-                    await Dialogs.Error(this, "Could not connect. Check the address, port and key, and that the server is running.");
+                    await Dialogs.Error(this, "Could not join. Check the address, port and key — and note the room must already exist (use \"Create a Room\" first, or ask whoever made it for the key).");
                 }
             }
             catch (Exception ex)
