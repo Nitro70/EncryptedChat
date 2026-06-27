@@ -69,7 +69,7 @@ namespace EncryptedChat
             _user = Ui.Field(s.Username, "Your name");
             stack.Children.Add(_user);
 
-            stack.Children.Add(Ui.Label("Encryption key (must match the server):"));
+            stack.Children.Add(Ui.Label("Encryption key (selects which room you join):"));
             _key = Ui.Password(s.EncryptionKey);
             stack.Children.Add(_key);
 

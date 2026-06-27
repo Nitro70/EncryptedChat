@@ -13,6 +13,7 @@ hardcoded.
 
 - 🔐 AES-256-CBC encryption (key derived from a shared passphrase)
 - 🌐 Connect to any server by address + port, or 🏠 discover servers on your LAN
+- 🚪 One server can host multiple isolated **rooms**, each with its own key
 - ✏️ Edit / 🗑️ delete messages · 😊 emoji reactions · 💬 replies
 - 📎 Image sharing · ⌨️ typing indicators · 👥 live user list · 📜 history on join
 - 👑 Optional admin panel (kick / ban / broadcast / stats / clear)
@@ -67,16 +68,28 @@ set your own values, then run `python server.py` again:
   "host": "0.0.0.0",
   "port": 8443,
   "adminPassword": "set-your-own",
-  "encryptionKey": "set-your-own-shared-key",
+  "rooms": [
+    { "name": "General", "key": "set-a-unique-key" },
+    { "name": "Private", "key": "set-another-unique-key" }
+  ],
   "certFile": "server.crt",
   "keyFile": "server.key"
 }
 ```
 
-- **`encryptionKey`** — every client must enter this exact key to talk to your
-  server. Share it only with people you want in the chat.
-- **`adminPassword`** — required to use the admin panel. The server refuses to
-  start until you set both of these (no defaults are shipped).
+### Rooms (multiple keyed sessions)
+
+One server hosts as many **rooms** as you list — each with its own **unique
+key**. A client lands in whichever room's key it connects with, and rooms are
+fully isolated (separate users, history and reactions). To invite someone to a
+room, share that room's key. Add or remove rooms by editing the list and
+restarting.
+
+- **room `key`** — the shared secret for that room; clients enter it to join.
+  Every room's key must be unique (and never a placeholder).
+- **`adminPassword`** — required to use the admin panel; admin actions apply to
+  the admin's own room. The server refuses to start until the admin password and
+  every room key are set (no defaults are shipped — **nothing is hardcoded**).
 - A self-signed TLS certificate is generated automatically on first run.
 
 The server keeps recent messages in memory only (capped, cleared on restart) —

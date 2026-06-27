@@ -132,6 +132,9 @@ namespace EncryptedChat
 
         private void HandleWelcome(JsonElement root)
         {
+            if (root.TryGetProperty("room", out var roomName) && roomName.ValueKind == JsonValueKind.String)
+                ServerNameText.Text = $"# {roomName.GetString()}";
+
             if (root.TryGetProperty("message", out var msg))
                 AddSystemMessage(msg.GetString() ?? "Connected");
 
